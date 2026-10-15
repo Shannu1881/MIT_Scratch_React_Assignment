@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import { startBlockDrag } from "../dragDrop";
 
 export const blockStyle = {
   move: "motion",
@@ -28,22 +29,23 @@ function NumberInput({ label, width, value, update }) {
   }, [value]);
 
   return (
-    <input
-      ref={inputRef}
-      aria-label={label}
-      className={`block-input ${width}`}
-      type="number"
-      inputMode="decimal"
-      defaultValue={value}
-      onChange={(event) => update(event.target.value)}
-      onBlur={(event) => {
-        const number = Number(event.target.value);
-        const normalized = Number.isFinite(number) ? number : 0;
-        event.target.value = normalized;
-        update(normalized);
-      }}
-      onClick={(event) => event.stopPropagation()}
-    />
+    <span className="block-field">
+      <input
+        ref={inputRef}
+        aria-label={label}
+        className={`block-input ${width}`}
+        type="number"
+        inputMode="decimal"
+        defaultValue={value}
+        onChange={(event) => update(event.target.value)}
+        onBlur={(event) => {
+          const number = Number(event.target.value);
+          const normalized = Number.isFinite(number) ? number : 0;
+          event.target.value = normalized;
+          update(normalized);
+        }}
+      />
+    </span>
   );
 }
 
@@ -71,13 +73,14 @@ export function BlockLabel({ block, update }) {
     return (
       <>
         {block.type === "say" ? "Say" : "Think"}{" "}
-        <input
-          aria-label="Speech text"
-          className="block-input text-input"
-          value={block.text}
-          onChange={(event) => update({ text: event.target.value })}
-          onClick={(event) => event.stopPropagation()}
-        />{" "}
+        <span className="block-field">
+          <input
+            aria-label="Speech text"
+            className="block-input text-input"
+            value={block.text}
+            onChange={(event) => update({ text: event.target.value })}
+              />
+        </span>{" "}
         for {numberInput("seconds", block.seconds)} sec
       </>
     );
@@ -85,9 +88,16 @@ export function BlockLabel({ block, update }) {
   return <>Repeat {numberInput("times", block.times)} times</>;
 }
 
-function ScriptBlock({ block, path, onUpdate, onRemove, onDrop }) {
+function ScriptBlock({ block, path, onUpdate, onRemove, onBlockDrop }) {
   return (
-    <div className={`script-block ${blockStyle[block.type]}`}>
+    <div
+      className={`script-block ${blockStyle[block.type]}`}
+      data-drop="block"
+      data-block-id={block.id}
+      onPointerDown={(event) =>
+        startBlockDrag(event, { kind: "script", blockId: block.id }, onBlockDrop)
+      }
+    >
       <div className="script-block-head">
         <span>
           <BlockLabel
@@ -108,8 +118,8 @@ function ScriptBlock({ block, path, onUpdate, onRemove, onDrop }) {
       {block.type === "repeat" && (
         <div
           className="repeat-contents"
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => onDrop(event, path)}
+          data-drop="repeat-body"
+          data-block-id={block.id}
         >
           {block.children.map((child, index) => (
             <ScriptBlock
@@ -118,7 +128,7 @@ function ScriptBlock({ block, path, onUpdate, onRemove, onDrop }) {
               path={[...path, index]}
               onUpdate={onUpdate}
               onRemove={onRemove}
-              onDrop={onDrop}
+              onBlockDrop={onBlockDrop}
             />
           ))}
           {block.children.length === 0 && (
@@ -134,7 +144,7 @@ export default function MidArea({
   sprite,
   onUpdate,
   onRemove,
-  onDrop,
+  onBlockDrop,
   onAddBlock,
 }) {
   return (
@@ -148,11 +158,7 @@ export default function MidArea({
           {sprite?.scripts.length || 0} blocks
         </span>
       </div>
-      <div
-        className="scripts-dropzone"
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => onDrop(event)}
-      >
+      <div className="scripts-dropzone" data-drop="script-area">
         {sprite?.scripts.length ? (
           sprite.scripts.map((block, index) => (
             <ScriptBlock
@@ -161,7 +167,7 @@ export default function MidArea({
               path={[index]}
               onUpdate={onUpdate}
               onRemove={onRemove}
-              onDrop={onDrop}
+              onBlockDrop={onBlockDrop}
             />
           ))
         ) : (
@@ -179,7 +185,10 @@ export default function MidArea({
         </button>
       </div>
       <div className="script-footer">
-        <span>Scripts are saved per sprite</span>
+        <span>
+          Drag a block to move it and the blocks below · drop on the palette to
+          delete · drop on a sprite to copy
+        </span>
         <span>Drop inside Repeat to nest</span>
       </div>
     </section>

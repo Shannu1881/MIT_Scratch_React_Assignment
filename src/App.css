@@ -207,6 +207,61 @@ button {
 .palette-block:active {
   cursor: grabbing;
 }
+.palette-block,
+.script-block {
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.block-input {
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: manipulation;
+}
+body.is-block-dragging,
+body.is-block-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+.drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  opacity: 0.92;
+  filter: drop-shadow(0 8px 10px rgba(0, 0, 0, 0.25));
+}
+.drag-ghost .script-block,
+.drag-ghost .palette-block {
+  margin-bottom: 4px;
+}
+.script-block.is-drag-source,
+.palette-block.is-drag-source {
+  opacity: 0.45;
+}
+.script-block.drop-before {
+  box-shadow: 0 -5px 0 0 #25282d;
+}
+.script-block.drop-after {
+  box-shadow: 0 5px 0 0 #25282d;
+}
+.repeat-contents.drop-inside {
+  outline: 3px solid #25282d;
+  outline-offset: -3px;
+}
+.scripts-dropzone.drop-active {
+  background: rgba(76, 151, 255, 0.06);
+  box-shadow: inset 0 0 0 2px rgba(76, 151, 255, 0.45);
+}
+.palette-panel.drop-active {
+  background: #fff4f4;
+  box-shadow: inset 0 0 0 2px #db5360;
+}
+.sprite-row.drop-active {
+  background: #eaf6e4;
+  border-color: #58aa47;
+}
 .palette-add {
   margin-left: auto;
   opacity: 0.72;
@@ -226,6 +281,10 @@ button {
   background: #ffbf3c;
   color: #41351e;
 }
+.block-field {
+  display: inline-block;
+  vertical-align: middle;
+}
 .block-input {
   height: 23px;
   padding: 1px 5px;
@@ -242,7 +301,7 @@ button {
   outline-offset: 1px;
 }
 .block-input.small {
-  width: 43px;
+  width: 54px;
 }
 .block-input.text-input {
   width: 76px;
@@ -298,7 +357,15 @@ button {
   max-width: 100%;
   margin: 0 0 8px;
   padding: 0;
+  cursor: grab;
   box-shadow: 0 2px 0 rgba(0, 0, 0, 0.14);
+}
+.script-block:active {
+  cursor: grabbing;
+}
+.script-block input,
+.script-block button {
+  cursor: auto;
 }
 .script-block-head {
   display: flex;
@@ -389,8 +456,9 @@ button {
 }
 .stage {
   position: relative;
-  height: auto;
-  aspect-ratio: 8 / 5;
+  /* Height (3/4 of the width) is set from PreviewArea.js; it does not rely
+     on CSS aspect-ratio, which older browsers ignore. */
+  height: 300px;
   margin: 20px 19px;
   overflow: hidden;
   background-color: #fff;
@@ -424,8 +492,14 @@ button {
   z-index: 1;
   top: 50%;
   left: 50%;
-  width: 82px;
+  width: 17.083333%;
   transition: transform 160ms linear;
+  cursor: grab;
+  touch-action: none;
+}
+.stage-sprite.is-dragging {
+  cursor: grabbing;
+  transition: none;
 }
 .stage-cat {
   width: 100%;
@@ -443,6 +517,10 @@ button {
   filter: hue-rotate(265deg) saturate(0.85);
 }
 .stage-sprite-name {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
   display: block;
   margin-top: 3px;
   color: #737983;
@@ -539,6 +617,23 @@ button {
   border: 1px solid var(--line);
   border-radius: 5px;
   text-align: left;
+}
+.sprite-row.drop-target {
+  background: #eaf6e4;
+  border-color: #58aa47;
+}
+.palette-panel.delete-hover {
+  background: #fff4f4;
+  box-shadow: inset 0 0 0 2px #db5360;
+}
+.sprite-swap-tag {
+  padding: 2px 6px;
+  color: #306e38;
+  background: #eff8e9;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 .sprite-row.selected {
   background: #f4f8ff;

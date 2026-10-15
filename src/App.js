@@ -10,6 +10,13 @@ const palette = {
   Control: ["repeat"],
 };
 
+// Same coordinate system as Scratch: x -240..240, y -180..180.
+const STAGE_WIDTH = 480;
+const STAGE_HEIGHT = 360;
+// Two sprites collide when their centres are closer than this (stage units).
+const COLLISION_DISTANCE = 76;
+const MAX_REPEAT = 1000;
+
 let nextBlockId = 0;
 let nextSpriteId = 3;
 
@@ -25,33 +32,93 @@ function makeBlock(type) {
   return block;
 }
 
-function makeSprite(id, name, x, steps, tint) {
+// A fresh block of `type`, optionally pre-filled from a palette template.
+function buildBlock(type, template = {}) {
+  const base = makeBlock(type);
+  return { ...base, ...template, id: base.id, type };
+}
+
+// Deep copy of a list of blocks with brand-new ids.
+function cloneBlocks(blocks) {
+  return blocks.map((block) => ({
+    ...block,
+    id: `block-${nextBlockId++}`,
+    ...(block.children ? { children: cloneBlocks(block.children) } : {}),
+  }));
+}
+
+function makeSprite(id, name, x, y, steps, tint) {
   return {
     id,
     name,
     x,
-    y: 0,
+    y,
     direction: 90,
     tint,
     bubble: null,
+    // Where the sprite starts every time Play is pressed.
+    home: { x, y, direction: 90 },
     scripts: [
-      makeBlock("move"),
+      { ...makeBlock("move"), steps },
       {
         ...makeBlock("repeat"),
         times: 18,
         children: [{ ...makeBlock("move"), steps }],
       },
-    ].map((block, index) => {
-      if (index === 0 && block.type === "move") return { ...block, steps };
-      return block;
-    }),
+    ],
   };
 }
 
-const initialSprites = [
-  makeSprite("sprite-1", "Pico", -105, 10, ""),
-  makeSprite("sprite-2", "Tera", 105, -10, "sprite-tint-blue"),
+// New sprites are placed in these slots in order, so they never land in
+// random places or on top of each other. Left-hand slots walk right and
+// right-hand slots walk left, so every row of two sprites meets in the middle.
+const SPRITE_SLOTS = [
+  { x: -105, y: 0, steps: 10 },
+  { x: 105, y: 0, steps: -10 },
+  { x: -105, y: 105, steps: 10 },
+  { x: 105, y: 105, steps: -10 },
+  { x: -105, y: -105, steps: 10 },
+  { x: 105, y: -105, steps: -10 },
 ];
+const SPRITE_TINTS = ["", "sprite-tint-blue", "sprite-tint-pink"];
+
+function makeSpriteInSlot(id, name, slot, tint) {
+  return makeSprite(id, name, slot.x, slot.y, slot.steps, tint);
+}
+
+const initialSprites = [
+  makeSpriteInSlot("sprite-1", "Pico", SPRITE_SLOTS[0], SPRITE_TINTS[0]),
+  makeSpriteInSlot("sprite-2", "Tera", SPRITE_SLOTS[1], SPRITE_TINTS[1]),
+];
+
+// First slot that is not already taken by a sprite.
+function findFreeSlot(sprites) {
+  return SPRITE_SLOTS.find((slot) =>
+    sprites.every(
+      (sprite) =>
+        Math.hypot(sprite.home.x - slot.x, sprite.home.y - slot.y) >=
+        COLLISION_DISTANCE,
+    ),
+  );
+}
+
+// Fallback once every slot is used: a random spot clear of the others.
+function findFreeSpot(sprites) {
+  let spot = { x: 0, y: 0 };
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    spot = {
+      x: Math.round((Math.random() * 2 - 1) * 170),
+      y: Math.round((Math.random() * 2 - 1) * 110),
+    };
+    const isFree = sprites.every(
+      (sprite) =>
+        Math.hypot(sprite.home.x - spot.x, sprite.home.y - spot.y) >=
+        COLLISION_DISTANCE + 24,
+    );
+    if (isFree) return spot;
+  }
+  return spot;
+}
 
 function patchBlock(blocks, path, updater) {
   if (path.length === 0) return blocks;
@@ -78,25 +145,100 @@ function appendBlock(blocks, path, block) {
   });
 }
 
-function swapMoveBlocks(blocks) {
-  return blocks.map((block) => {
-    if (block.type === "move")
-      return { ...block, steps: -Number(block.steps || 0) };
-    if (block.children)
-      return { ...block, children: swapMoveBlocks(block.children) };
-    return block;
+function findBlockPath(blocks, blockId, parentPath = []) {
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    const path = [...parentPath, index];
+    if (block.id === blockId) return path;
+    const childPath = findBlockPath(block.children || [], blockId, path);
+    if (childPath) return childPath;
+  }
+  return null;
+}
+
+function containsId(blocks, blockId) {
+  return blocks.some(
+    (block) =>
+      block.id === blockId || containsId(block.children || [], blockId),
+  );
+}
+
+// Insert a list of blocks before / after / inside the block with `targetId`.
+function insertBlocksRelative(blocks, targetId, newBlocks, placement) {
+  return blocks.flatMap((current) => {
+    if (current.id === targetId) {
+      if (placement === "inside" && current.type === "repeat") {
+        return [
+          {
+            ...current,
+            children: [...(current.children || []), ...newBlocks],
+          },
+        ];
+      }
+      return placement === "before"
+        ? [...newBlocks, current]
+        : [current, ...newBlocks];
+    }
+    if (!current.children) return [current];
+    return [
+      {
+        ...current,
+        children: insertBlocksRelative(
+          current.children,
+          targetId,
+          newBlocks,
+          placement,
+        ),
+      },
+    ];
   });
 }
 
-function getBlockAtPath(blocks, path) {
-  let current = blocks;
-  let block = null;
-  for (const index of path) {
-    block = current[index];
-    if (!block) return null;
-    current = block.children || [];
+// Like Scratch: grabbing a block takes it and every block below it
+// (in the same stack) along with it.
+function takeStack(blocks, path) {
+  const [index, ...rest] = path;
+  if (rest.length === 0) {
+    return { stack: blocks.slice(index), remaining: blocks.slice(0, index) };
   }
-  return block;
+  const inner = takeStack(blocks[index].children || [], rest);
+  return {
+    stack: inner.stack,
+    remaining: blocks.map((block, blockIndex) =>
+      blockIndex === index ? { ...block, children: inner.remaining } : block,
+    ),
+  };
+}
+
+function removeAtPath(blocks, path) {
+  const [index, ...rest] = path;
+  if (rest.length === 0)
+    return blocks.filter((_, blockIndex) => blockIndex !== index);
+  return blocks.map((block, blockIndex) =>
+    blockIndex === index
+      ? { ...block, children: removeAtPath(block.children || [], rest) }
+      : block,
+  );
+}
+
+function getBlocksAtPath(blocks, path) {
+  if (path.length === 0) return blocks;
+  const [index, ...rest] = path;
+  return getBlocksAtPath(blocks[index]?.children || [], rest);
+}
+
+function getOverlappingPairs(sprites) {
+  const pairs = [];
+  for (let first = 0; first < sprites.length; first += 1) {
+    for (let second = first + 1; second < sprites.length; second += 1) {
+      const a = sprites[first];
+      const b = sprites[second];
+      if (Math.hypot(a.x - b.x, a.y - b.y) < COLLISION_DISTANCE) {
+        pairs.push([a.id, b.id]);
+      }
+    }
+  }
+  return pairs;
 }
 
 export default function App() {
@@ -105,9 +247,15 @@ export default function App() {
   const [activeCategory, setActiveCategory] = useState("Motion");
   const [isRunning, setIsRunning] = useState(false);
   const [collisionCount, setCollisionCount] = useState(0);
+  // spriteId -> id of the sprite whose script it is currently running.
+  // Collisions swap these entries; the scripts themselves are never edited,
+  // so every Run starts from exactly what is shown in the editor.
+  const [scriptSource, setScriptSource] = useState({});
   const spritesRef = useRef(sprites);
+  const scriptSourceRef = useRef({});
+  const overlappingRef = useRef(new Set());
+  const isRunningRef = useRef(false);
   const runToken = useRef(0);
-  const collisionReady = useRef(true);
   const selectedSprite =
     sprites.find((sprite) => sprite.id === selectedSpriteId) || sprites[0];
 
@@ -136,36 +284,76 @@ export default function App() {
   }
 
   function addBlock(type, destination = [], template = {}) {
-    const block = makeBlock(type);
+    const block = buildBlock(type, template);
     updateSprite(selectedSpriteId, (sprite) => ({
       ...sprite,
-      scripts: appendBlock(sprite.scripts, destination, {
-        ...block,
-        ...template,
-        id: block.id,
-        type,
-      }),
+      scripts: appendBlock(sprite.scripts, destination, block),
     }));
   }
 
-  function onPaletteDrop(event, destination = []) {
-    event.preventDefault();
-    event.stopPropagation();
-    const type = event.dataTransfer.getData("text/block-type");
-    if (
-      palette.Motion.includes(type) ||
-      palette.Looks.includes(type) ||
-      palette.Control.includes(type)
-    ) {
-      let template = {};
-      try {
-        template = JSON.parse(
-          event.dataTransfer.getData("application/json") || "{}",
-        );
-      } catch {
-        template = {};
-      }
-      addBlock(type, destination, template);
+  // Called by the pointer drag system (see dragDrop.js) when a block is
+  // released. `payload` says what was dragged (a palette template or an
+  // existing script block); `target` says where it was dropped.
+  function onBlockDrop(payload, target) {
+    if (payload.kind === "palette") {
+      const block = buildBlock(payload.type, payload.template);
+      updateSprite(selectedSpriteId, (sprite) => {
+        if (target.kind === "script-area") {
+          return { ...sprite, scripts: [...sprite.scripts, block] };
+        }
+        if (target.kind !== "block" && target.kind !== "repeat-body") {
+          return sprite;
+        }
+        const placement =
+          target.kind === "repeat-body" ? "inside" : target.placement;
+        return {
+          ...sprite,
+          scripts: insertBlocksRelative(
+            sprite.scripts,
+            target.id,
+            [block],
+            placement,
+          ),
+        };
+      });
+      return;
+    }
+
+    const blockId = payload.blockId;
+    const source = spritesRef.current.find(
+      (sprite) => sprite.id === selectedSpriteId,
+    );
+    const sourcePath = source && findBlockPath(source.scripts, blockId);
+    if (!sourcePath) return;
+    const { stack, remaining } = takeStack(source.scripts, sourcePath);
+
+    if (target.kind === "palette") {
+      // Dropping a script block onto the palette deletes it (like Scratch).
+      updateSprite(selectedSpriteId, (sprite) => ({
+        ...sprite,
+        scripts: remaining,
+      }));
+    } else if (target.kind === "sprite") {
+      // Dropping onto a sprite in the sprite list copies the stack there.
+      if (target.spriteId === selectedSpriteId) return;
+      updateSprite(target.spriteId, (sprite) => ({
+        ...sprite,
+        scripts: [...sprite.scripts, ...cloneBlocks(stack)],
+      }));
+    } else if (target.kind === "script-area") {
+      updateSprite(selectedSpriteId, (sprite) => ({
+        ...sprite,
+        scripts: [...remaining, ...stack],
+      }));
+    } else {
+      // Can't drop a stack onto itself or into one of its own repeat blocks.
+      if (containsId(stack, target.id)) return;
+      const placement =
+        target.kind === "repeat-body" ? "inside" : target.placement;
+      updateSprite(selectedSpriteId, (sprite) => ({
+        ...sprite,
+        scripts: insertBlocksRelative(remaining, target.id, stack, placement),
+      }));
     }
   }
 
@@ -180,77 +368,64 @@ export default function App() {
   }
 
   function removeBlock(path) {
-    const [index, ...parentPath] = path;
     updateSprite(selectedSpriteId, (sprite) => ({
       ...sprite,
-      scripts: patchBlock(sprite.scripts, parentPath, (parent) => {
-        if (parentPath.length === 0) return parent;
-        const children = [...(parent.children || [])];
-        children.splice(index, 1);
-        return { ...parent, children };
-      }),
-      ...(parentPath.length === 0
-        ? { scripts: removeAtPath(sprite.scripts, path) }
-        : {}),
+      scripts: removeAtPath(sprite.scripts, path),
     }));
   }
 
   function addSprite() {
     const id = `sprite-${nextSpriteId++}`;
-    const newSprite = makeSprite(
+    const current = spritesRef.current;
+    const slot = findFreeSlot(current) || {
+      ...findFreeSpot(current),
+      steps: 10,
+    };
+    const newSprite = makeSpriteInSlot(
       id,
       `Sprite ${nextSpriteId - 1}`,
-      0,
-      10,
-      "sprite-tint-pink",
+      slot,
+      SPRITE_TINTS[current.length % SPRITE_TINTS.length],
     );
-    commitSprites([...spritesRef.current, newSprite]);
+    commitSprites([...current, newSprite]);
     setSelectedSpriteId(id);
   }
 
+  // Hero feature: when two sprites newly touch, they swap animations.
   function checkCollision() {
-    const current = spritesRef.current;
-    if (current.length < 2) return;
-    let collidedPair = null;
-    for (
-      let firstIndex = 0;
-      firstIndex < current.length && !collidedPair;
-      firstIndex += 1
-    ) {
-      for (
-        let secondIndex = firstIndex + 1;
-        secondIndex < current.length;
-        secondIndex += 1
-      ) {
-        const first = current[firstIndex];
-        const second = current[secondIndex];
-        if (Math.hypot(first.x - second.x, first.y - second.y) < 76) {
-          collidedPair = [first.id, second.id];
-          break;
-        }
-      }
-    }
-    if (!collidedPair) {
-      collisionReady.current = true;
-      return;
-    }
-    if (!collisionReady.current) return;
-    collisionReady.current = false;
-    commitSprites(
-      current.map((sprite) =>
-        collidedPair.includes(sprite.id)
-          ? { ...sprite, scripts: swapMoveBlocks(sprite.scripts) }
-          : sprite,
-      ),
+    if (!isRunningRef.current) return;
+    const pairs = getOverlappingPairs(spritesRef.current);
+    const keys = new Set(pairs.map((pair) => pair.join("|")));
+    const fresh = pairs.filter(
+      (pair) => !overlappingRef.current.has(pair.join("|")),
     );
-    setCollisionCount((count) => count + 1);
+    overlappingRef.current = keys;
+    if (fresh.length === 0) return;
+
+    const next = { ...scriptSourceRef.current };
+    fresh.forEach(([a, b]) => {
+      const sourceA = next[a] || a;
+      const sourceB = next[b] || b;
+      next[a] = sourceB;
+      next[b] = sourceA;
+    });
+    scriptSourceRef.current = next;
+    setScriptSource(next);
+    setCollisionCount((count) => count + fresh.length);
   }
 
   function moveSprite(spriteId, x, y) {
+    const nextX = Math.max(-STAGE_WIDTH / 2, Math.min(STAGE_WIDTH / 2, x));
+    const nextY = Math.max(-STAGE_HEIGHT / 2, Math.min(STAGE_HEIGHT / 2, y));
+    const idle = !isRunningRef.current;
     updateSprite(spriteId, (sprite) => ({
       ...sprite,
-      x: Math.max(-210, Math.min(210, x)),
-      y: Math.max(-125, Math.min(125, y)),
+      x: nextX,
+      y: nextY,
+      // Dragging a sprite while idle sets where it starts the next run.
+      ...(idle
+        ? { home: { x: nextX, y: nextY, direction: sprite.home.direction } }
+        : {}),
     }));
     checkCollision();
   }
@@ -260,20 +435,26 @@ export default function App() {
     return runToken.current === token;
   }
 
+  // The script a sprite is currently running (its own, or a swapped one).
+  function getScripts(spriteId) {
+    const sourceId = scriptSourceRef.current[spriteId] || spriteId;
+    const source = spritesRef.current.find((sprite) => sprite.id === sourceId);
+    return source ? source.scripts : [];
+  }
+
   async function executeSequence(spriteId, parentPath, token) {
-    const initial = spritesRef.current.find((sprite) => sprite.id === spriteId);
-    const blockCount = getBlocksAtPath(
-      initial?.scripts || [],
-      parentPath,
-    ).length;
-    for (let index = 0; index < blockCount; index += 1) {
+    // The script is re-read on every step so a swap takes effect immediately.
+    for (let index = 0; ; index += 1) {
       if (runToken.current !== token) return;
+      const blocks = getBlocksAtPath(getScripts(spriteId), parentPath);
+      if (index >= blocks.length) return;
+      const block = blocks[index];
       const path = [...parentPath, index];
       const sprite = spritesRef.current.find((item) => item.id === spriteId);
-      const block = sprite && getBlockAtPath(sprite.scripts, path);
-      if (!block) continue;
+      if (!sprite) return;
+
       if (block.type === "move") {
-        const distance = Number(block.steps || 0) * 3;
+        const distance = Number(block.steps || 0);
         const radians = (sprite.direction * Math.PI) / 180;
         moveSprite(
           spriteId,
@@ -300,7 +481,10 @@ export default function App() {
           return;
         updateSprite(spriteId, (current) => ({ ...current, bubble: null }));
       } else if (block.type === "repeat") {
-        const repeatCount = Math.max(0, Math.min(50, Number(block.times) || 0));
+        const repeatCount = Math.max(
+          0,
+          Math.min(MAX_REPEAT, Math.floor(Number(block.times) || 0)),
+        );
         for (let iteration = 0; iteration < repeatCount; iteration += 1) {
           if (!(await wait(0, token))) return;
           await executeSequence(spriteId, path, token);
@@ -310,22 +494,47 @@ export default function App() {
   }
 
   async function runAll() {
+    if (isRunningRef.current) return;
     const token = runToken.current + 1;
     runToken.current = token;
-    collisionReady.current = true;
-    setCollisionCount(0);
-    setIsRunning(true);
-    await Promise.all(
-      spritesRef.current.map((sprite) => executeSequence(sprite.id, [], token)),
+
+    // Every run starts from the same place with the scripts as written.
+    const startState = spritesRef.current.map((sprite) => ({
+      ...sprite,
+      x: sprite.home.x,
+      y: sprite.home.y,
+      direction: sprite.home.direction,
+      bubble: null,
+    }));
+    commitSprites(startState);
+    scriptSourceRef.current = {};
+    setScriptSource({});
+    // Sprites that already overlap at the start must separate and touch
+    // again before they swap.
+    overlappingRef.current = new Set(
+      getOverlappingPairs(startState).map((pair) => pair.join("|")),
     );
-    if (runToken.current === token) setIsRunning(false);
+    setCollisionCount(0);
+    isRunningRef.current = true;
+    setIsRunning(true);
+
+    await Promise.all(
+      startState.map((sprite) => executeSequence(sprite.id, [], token)),
+    );
+    if (runToken.current === token) {
+      isRunningRef.current = false;
+      setIsRunning(false);
+    }
   }
 
   function stopAll() {
     runToken.current += 1;
+    isRunningRef.current = false;
     setIsRunning(false);
-    spritesRef.current.forEach((sprite) =>
-      updateSprite(sprite.id, (current) => ({ ...current, bubble: null })),
+    scriptSourceRef.current = {};
+    setScriptSource({});
+    commitSprites(
+      spritesRef.current.map((sprite) => ({ ...sprite, bubble: null })),
     );
   }
 
@@ -349,7 +558,7 @@ export default function App() {
             onClick={runAll}
             disabled={isRunning}
           >
-            Run all
+            ▶ Play
           </button>
           <button
             className="stop-button"
@@ -357,7 +566,7 @@ export default function App() {
             onClick={stopAll}
             disabled={!isRunning}
           >
-            Stop
+            ■ Stop
           </button>
         </div>
       </header>
@@ -369,39 +578,25 @@ export default function App() {
           onCategoryChange={setActiveCategory}
           makeBlock={makeBlock}
           onAddBlock={addBlock}
+          onBlockDrop={onBlockDrop}
         />
         <MidArea
           sprite={selectedSprite}
           onUpdate={updateBlock}
           onRemove={removeBlock}
-          onDrop={onPaletteDrop}
+          onBlockDrop={onBlockDrop}
           onAddBlock={addBlock}
         />
         <PreviewArea
           sprites={sprites}
           selectedSpriteId={selectedSpriteId}
           onSelectSprite={setSelectedSpriteId}
+          onMoveSprite={moveSprite}
           onAddSprite={addSprite}
+          scriptSource={scriptSource}
           collisionCount={collisionCount}
         />
       </div>
     </main>
   );
-}
-
-function removeAtPath(blocks, path) {
-  const [index, ...rest] = path;
-  if (rest.length === 0)
-    return blocks.filter((_, blockIndex) => blockIndex !== index);
-  return blocks.map((block, blockIndex) =>
-    blockIndex === index
-      ? { ...block, children: removeAtPath(block.children || [], rest) }
-      : block,
-  );
-}
-
-function getBlocksAtPath(blocks, path) {
-  if (path.length === 0) return blocks;
-  const [index, ...rest] = path;
-  return getBlocksAtPath(blocks[index]?.children || [], rest);
 }
